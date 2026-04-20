@@ -1,0 +1,54 @@
+{
+  "expo": {
+    "name": "ContextNote",
+    "slug": "context-note",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b0c10"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.contextnote.app",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "강의/회의 녹음을 위해 마이크를 사용합니다.",
+        "NSSpeechRecognitionUsageDescription": "음성을 텍스트로 변환해 실시간으로 본론과 사담을 정리합니다."
+      }
+    },
+    "android": {
+      "package": "com.contextnote.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0b0c10"
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "강의/회의 녹음을 위해 마이크를 사용합니다.",
+          "speechRecognitionPermission": "음성을 텍스트로 변환해 실시간으로 본론과 사담을 정리합니다.",
+          "androidSpeechServicePackages": [
+            "com.google.android.googlequicksearchbox"
+          ]
+        }
+      ]
+    ],
+    "extra": {
+      "backendUrl": "http://localhost:8080"
+    }
+  }
+}
