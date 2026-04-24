@@ -48,8 +48,8 @@
         }
       ]
     ],
+    "owner": "YOUR_EXPO_USERNAME",
     "extra": {
-      "backendUrl": "http://localhost:8080",
       "eas": {
         "projectId": "YOUR_EAS_PROJECT_ID"
       }
