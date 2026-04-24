@@ -1,10 +1,10 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { StatusBar } from 'expo-status-bar';
-import Constants from 'expo-constants';
 import {
   ExpoSpeechRecognitionModule,
   useSpeechRecognitionEvent,
 } from 'expo-speech-recognition';
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -30,10 +30,116 @@ type Chunk = {
   error?: string;
 };
 
-const BACKEND_URL: string =
-  (Constants.expoConfig?.extra?.backendUrl as string | undefined) ?? 'http://localhost:8080';
+type Screen = 'setup' | 'main';
 
-export default function App() {
+const STORAGE_KEY = '@context_note_backend_url';
+const DEFAULT_URL = 'http://192.168.0.x:8080';
+
+// ─── Setup Screen ────────────────────────────────────────────────────────────
+
+function SetupScreen({ onSave }: { onSave: (url: string) => void }) {
+  const [url, setUrl] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  const testConnection = async () => {
+    const target = url.trim();
+    if (!target) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await fetch(`${target}/api/health`, { signal: AbortSignal.timeout(5000) });
+      const json = (await res.json()) as { status?: string };
+      if (json.status === 'ok') {
+        setTestResult({ ok: true, msg: '연결 성공! 서버가 정상입니다.' });
+      } else {
+        setTestResult({ ok: false, msg: '서버 응답이 예상과 다릅니다.' });
+      }
+    } catch (e) {
+      setTestResult({ ok: false, msg: `연결 실패: ${e instanceof Error ? e.message : String(e)}` });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const save = () => {
+    const target = url.trim();
+    if (!target) {
+      Alert.alert('URL 필요', '백엔드 서버 주소를 입력하세요.');
+      return;
+    }
+    onSave(target);
+  };
+
+  return (
+    <KeyboardAvoidingView
+      style={styles.root}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+    >
+      <StatusBar style="light" />
+      <ScrollView contentContainerStyle={styles.scroll}>
+        <Text style={styles.title}>ContextNote</Text>
+        <Text style={styles.subtitle}>처음 시작하기 전에 백엔드 서버 주소를 설정해 주세요.</Text>
+
+        <View style={[styles.panel, { marginTop: 32 }]}>
+          <Text style={styles.label}>백엔드 URL</Text>
+          <TextInput
+            style={styles.input}
+            value={url}
+            onChangeText={(v) => { setUrl(v); setTestResult(null); }}
+            placeholder={DEFAULT_URL}
+            placeholderTextColor="#6a6f79"
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+          />
+          <Text style={styles.hint}>
+            PC와 동일한 Wi-Fi에 연결된 상태에서{'\n'}
+            PC IP + 포트 8080 형식으로 입력하세요.{'\n'}
+            예) http://192.168.1.10:8080
+          </Text>
+
+          {testResult && (
+            <View style={[styles.testResult, testResult.ok ? styles.testOk : styles.testFail]}>
+              <Text style={testResult.ok ? styles.testOkText : styles.testFailText}>
+                {testResult.msg}
+              </Text>
+            </View>
+          )}
+
+          <View style={[styles.rowStart, { marginTop: 16 }]}>
+            <Pressable
+              style={[styles.secondary, (!url.trim() || testing) && styles.disabled]}
+              onPress={testConnection}
+              disabled={!url.trim() || testing}
+            >
+              {testing
+                ? <ActivityIndicator color="#e6e7ea" />
+                : <Text style={styles.secondaryText}>연결 테스트</Text>}
+            </Pressable>
+            <Pressable
+              style={[styles.primary, !url.trim() && styles.disabled]}
+              onPress={save}
+              disabled={!url.trim()}
+            >
+              <Text style={styles.primaryText}>저장 후 시작</Text>
+            </Pressable>
+          </View>
+        </View>
+      </ScrollView>
+    </KeyboardAvoidingView>
+  );
+}
+
+// ─── Main Screen ─────────────────────────────────────────────────────────────
+
+function MainScreen({
+  backendUrl,
+  onOpenSettings,
+}: {
+  backendUrl: string;
+  onOpenSettings: () => void;
+}) {
   const [agenda, setAgenda] = useState('');
   const [chunks, setChunks] = useState<Chunk[]>([]);
   const [recording, setRecording] = useState(false);
@@ -45,25 +151,32 @@ export default function App() {
   const agendaRef = useRef(agenda);
   agendaRef.current = agenda;
 
-  const analyzeChunk = useCallback(async (id: number, text: string, agendaNow: string) => {
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/analyze-chunk`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agenda: agendaNow, textChunk: text }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = (await res.json()) as { category: Category; summary: string };
-      setChunks((prev) =>
-        prev.map((c) =>
-          c.id === id ? { ...c, category: data.category, summary: data.summary, pending: false } : c,
-        ),
-      );
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setChunks((prev) => prev.map((c) => (c.id === id ? { ...c, pending: false, error: msg } : c)));
-    }
-  }, []);
+  const analyzeChunk = useCallback(
+    async (id: number, text: string, agendaNow: string) => {
+      try {
+        const res = await fetch(`${backendUrl}/api/analyze-chunk`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agenda: agendaNow, textChunk: text }),
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const data = (await res.json()) as { category: Category; summary: string };
+        setChunks((prev) =>
+          prev.map((c) =>
+            c.id === id
+              ? { ...c, category: data.category, summary: data.summary, pending: false }
+              : c,
+          ),
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setChunks((prev) =>
+          prev.map((c) => (c.id === id ? { ...c, pending: false, error: msg } : c)),
+        );
+      }
+    },
+    [backendUrl],
+  );
 
   useSpeechRecognitionEvent('result', (event) => {
     const last = event.results?.[event.results.length - 1];
@@ -76,7 +189,7 @@ export default function App() {
   });
 
   useSpeechRecognitionEvent('error', (event) => {
-    setError(`음성 인식 오류: ${event.error ?? 'unknown'}${event.message ? ` - ${event.message}` : ''}`);
+    setError(`음성 인식 오류: ${event.error ?? 'unknown'}${event.message ? ` — ${event.message}` : ''}`);
     setRecording(false);
   });
 
@@ -123,11 +236,15 @@ export default function App() {
     setGenerating(true);
     setFinalNote('');
     try {
-      const mainNotes = chunks.filter((c) => c.category === 'main' && c.summary).map((c) => c.summary!);
-      const sideNotes = chunks.filter((c) => c.category === 'side' && c.summary).map((c) => c.summary!);
+      const mainNotes = chunks
+        .filter((c) => c.category === 'main' && c.summary)
+        .map((c) => c.summary!);
+      const sideNotes = chunks
+        .filter((c) => c.category === 'side' && c.summary)
+        .map((c) => c.summary!);
       const fullText = chunks.map((c) => c.text).join('\n');
 
-      const res = await fetch(`${BACKEND_URL}/api/generate-final-note`, {
+      const res = await fetch(`${backendUrl}/api/generate-final-note`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agenda, mainNotes, sideNotes, fullText }),
@@ -147,7 +264,7 @@ export default function App() {
     } finally {
       setGenerating(false);
     }
-  }, [agenda, chunks]);
+  }, [agenda, chunks, backendUrl]);
 
   const resetAll = useCallback(() => {
     if (recording) ExpoSpeechRecognitionModule.stop();
@@ -158,11 +275,10 @@ export default function App() {
     chunkIdRef.current = 0;
   }, [recording]);
 
-  const stats = useMemo(() => {
-    const mainCount = chunks.filter((c) => c.category === 'main').length;
-    const sideCount = chunks.filter((c) => c.category === 'side').length;
-    return { mainCount, sideCount };
-  }, [chunks]);
+  const stats = useMemo(() => ({
+    mainCount: chunks.filter((c) => c.category === 'main').length,
+    sideCount: chunks.filter((c) => c.category === 'side').length,
+  }), [chunks]);
 
   return (
     <KeyboardAvoidingView
@@ -171,11 +287,19 @@ export default function App() {
     >
       <StatusBar style="light" />
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-        <Text style={styles.title}>ContextNote</Text>
-        <Text style={styles.subtitle}>
-          강의/회의 실시간 정리 — 본론과 사담을 자동 분류합니다.
-        </Text>
 
+        {/* Header */}
+        <View style={styles.rowBetween}>
+          <View>
+            <Text style={styles.title}>ContextNote</Text>
+            <Text style={styles.subtitle}>강의/회의 실시간 정리</Text>
+          </View>
+          <Pressable style={styles.settingsBtn} onPress={onOpenSettings}>
+            <Text style={styles.settingsBtnText}>⚙</Text>
+          </Pressable>
+        </View>
+
+        {/* Agenda */}
         <Text style={styles.section}>아젠다</Text>
         <View style={styles.panel}>
           <TextInput
@@ -189,6 +313,7 @@ export default function App() {
           />
         </View>
 
+        {/* Recording */}
         <Text style={styles.section}>녹음</Text>
         <View style={styles.panel}>
           <View style={styles.rowBetween}>
@@ -201,24 +326,24 @@ export default function App() {
                   : ''}
               </Text>
             </View>
-          </View>
-          <View style={[styles.rowStart, { marginTop: 12 }]}>
-            {!recording ? (
-              <Pressable style={styles.primary} onPress={startRecording}>
-                <Text style={styles.primaryText}>녹음 시작</Text>
+            <View style={styles.rowStart}>
+              {!recording ? (
+                <Pressable style={styles.primary} onPress={startRecording}>
+                  <Text style={styles.primaryText}>녹음 시작</Text>
+                </Pressable>
+              ) : (
+                <Pressable style={styles.danger} onPress={stopRecording}>
+                  <Text style={styles.dangerText}>중지</Text>
+                </Pressable>
+              )}
+              <Pressable
+                style={[styles.secondary, recording && styles.disabled]}
+                onPress={resetAll}
+                disabled={recording}
+              >
+                <Text style={styles.secondaryText}>초기화</Text>
               </Pressable>
-            ) : (
-              <Pressable style={styles.danger} onPress={stopRecording}>
-                <Text style={styles.dangerText}>중지</Text>
-              </Pressable>
-            )}
-            <Pressable
-              style={[styles.secondary, recording && styles.disabled]}
-              onPress={resetAll}
-              disabled={recording}
-            >
-              <Text style={styles.secondaryText}>초기화</Text>
-            </Pressable>
+            </View>
           </View>
 
           {chunks.map((c) => (
@@ -241,19 +366,29 @@ export default function App() {
               </Text>
               <View style={{ flex: 1 }}>
                 <Text style={styles.chunkText}>{c.text}</Text>
-                {c.summary ? <Text style={styles.chunkSummary}>→ {c.summary}</Text> : null}
-                {c.error ? <Text style={styles.chunkError}>{c.error}</Text> : null}
+                {c.summary ? (
+                  <Text style={styles.chunkSummary}>→ {c.summary}</Text>
+                ) : null}
+                {c.error ? (
+                  <Text style={styles.chunkError}>{c.error}</Text>
+                ) : null}
               </View>
             </View>
           ))}
         </View>
 
+        {/* Final Note */}
         <Text style={styles.section}>최종 노트</Text>
         <View style={styles.panel}>
           <View style={styles.rowBetween}>
-            <Text style={styles.status}>녹음을 마친 뒤 전체를 하나의 문서로 정리합니다.</Text>
+            <Text style={[styles.status, { flexShrink: 1 }]}>
+              녹음을 마친 뒤 전체를 하나의 문서로 정리합니다.
+            </Text>
             <Pressable
-              style={[styles.primary, (generating || recording || chunks.length === 0) && styles.disabled]}
+              style={[
+                styles.primary,
+                (generating || recording || chunks.length === 0) && styles.disabled,
+              ]}
               onPress={generateFinal}
               disabled={generating || recording || chunks.length === 0}
             >
@@ -283,11 +418,56 @@ export default function App() {
   );
 }
 
+// ─── Root ─────────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [screen, setScreen] = useState<Screen | null>(null);
+  const [backendUrl, setBackendUrl] = useState('');
+
+  useEffect(() => {
+    AsyncStorage.getItem(STORAGE_KEY).then((saved) => {
+      if (saved) {
+        setBackendUrl(saved);
+        setScreen('main');
+      } else {
+        setScreen('setup');
+      }
+    });
+  }, []);
+
+  const handleSave = useCallback(async (url: string) => {
+    await AsyncStorage.setItem(STORAGE_KEY, url);
+    setBackendUrl(url);
+    setScreen('main');
+  }, []);
+
+  const handleOpenSettings = useCallback(() => {
+    setScreen('setup');
+  }, []);
+
+  if (screen === null) {
+    return (
+      <View style={[styles.root, { alignItems: 'center', justifyContent: 'center' }]}>
+        <StatusBar style="light" />
+        <ActivityIndicator color="#7c9eff" />
+      </View>
+    );
+  }
+
+  if (screen === 'setup') {
+    return <SetupScreen onSave={handleSave} />;
+  }
+
+  return <MainScreen backendUrl={backendUrl} onOpenSettings={handleOpenSettings} />;
+}
+
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: '#0b0c10' },
   scroll: { padding: 20, paddingBottom: 80 },
   title: { color: '#e6e7ea', fontSize: 26, fontWeight: '700' },
-  subtitle: { color: '#8a8f99', fontSize: 13, marginTop: 4 },
+  subtitle: { color: '#8a8f99', fontSize: 13, marginTop: 2 },
   section: {
     color: '#8a8f99',
     fontSize: 12,
@@ -304,6 +484,16 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 16,
   },
+  label: { color: '#e6e7ea', fontSize: 14, fontWeight: '600', marginBottom: 8 },
+  input: {
+    color: '#e6e7ea',
+    backgroundColor: '#0f1218',
+    borderColor: '#262a33',
+    borderWidth: 1,
+    borderRadius: 6,
+    padding: 10,
+    fontSize: 14,
+  },
   textarea: {
     color: '#e6e7ea',
     backgroundColor: '#0f1218',
@@ -315,6 +505,12 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
     fontSize: 14,
   },
+  hint: { color: '#8a8f99', fontSize: 12, marginTop: 8, lineHeight: 18 },
+  testResult: { borderRadius: 6, padding: 10, marginTop: 12 },
+  testOk: { backgroundColor: '#0d2b1e' },
+  testFail: { backgroundColor: '#2b0d0d' },
+  testOkText: { color: '#3ecf8e', fontSize: 13 },
+  testFailText: { color: '#e24d4d', fontSize: 13 },
   rowStart: { flexDirection: 'row', alignItems: 'center', gap: 10, flexWrap: 'wrap' },
   rowBetween: {
     flexDirection: 'row',
@@ -325,8 +521,13 @@ const styles = StyleSheet.create({
   },
   dot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#8a8f99' },
   dotRec: { backgroundColor: '#e24d4d' },
-  status: { color: '#8a8f99', fontSize: 13, flexShrink: 1 },
-  primary: { backgroundColor: '#7c9eff', paddingVertical: 10, paddingHorizontal: 16, borderRadius: 6 },
+  status: { color: '#8a8f99', fontSize: 13 },
+  primary: {
+    backgroundColor: '#7c9eff',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 6,
+  },
   primaryText: { color: '#0b0c10', fontWeight: '700', fontSize: 14 },
   secondary: {
     borderColor: '#262a33',
@@ -336,9 +537,22 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   secondaryText: { color: '#e6e7ea', fontSize: 14 },
-  danger: { backgroundColor: '#e24d4d', paddingVertical: 10, paddingHorizontal: 16, borderRadius: 6 },
+  danger: {
+    backgroundColor: '#e24d4d',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 6,
+  },
   dangerText: { color: '#fff', fontWeight: '700', fontSize: 14 },
   disabled: { opacity: 0.5 },
+  settingsBtn: {
+    padding: 8,
+    borderRadius: 8,
+    backgroundColor: '#151820',
+    borderColor: '#262a33',
+    borderWidth: 1,
+  },
+  settingsBtnText: { color: '#8a8f99', fontSize: 18 },
   chunk: {
     flexDirection: 'row',
     gap: 10,
@@ -381,11 +595,10 @@ const markdownStyles = {
   heading1: { color: '#e6e7ea', fontSize: 20, fontWeight: '700' as const, marginTop: 8 },
   heading2: { color: '#e6e7ea', fontSize: 17, fontWeight: '700' as const, marginTop: 8 },
   heading3: { color: '#e6e7ea', fontSize: 15, fontWeight: '700' as const, marginTop: 8 },
+  paragraph: { color: '#e6e7ea', marginVertical: 4 },
   bullet_list: { color: '#e6e7ea' },
   ordered_list: { color: '#e6e7ea' },
-  paragraph: { color: '#e6e7ea', marginVertical: 4 },
   code_inline: { backgroundColor: '#262a33', color: '#e6e7ea', padding: 2, borderRadius: 3 },
-  code_block: { backgroundColor: '#0b0c10', color: '#e6e7ea', padding: 10, borderRadius: 6 },
   fence: { backgroundColor: '#0b0c10', color: '#e6e7ea', padding: 10, borderRadius: 6 },
   link: { color: '#7c9eff' },
 };
