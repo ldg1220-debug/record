@@ -222,6 +222,7 @@ function formatList(items, maxItemLen) {
 function handleApiError(err, res) {
   // Google GenAI는 에러를 status 필드 있는 객체로 던짐
   const status = err?.status ?? err?.response?.status;
+  console.error('[gemini error] status:', status, 'message:', err?.message ?? err);
   if (status === 429) {
     return res.status(429).json({ error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
   }
@@ -241,6 +242,8 @@ if (!process.env.GOOGLE_API_KEY) {
 }
 if (!API_TOKEN) {
   console.warn('[security] API_TOKEN 미설정 — 인증 없이 동작 중. .env에 API_TOKEN을 추가하세요.');
+} else {
+  console.log(`[security] API_TOKEN loaded: length=${API_TOKEN.length}, preview=${API_TOKEN.slice(0, 6)}...${API_TOKEN.slice(-6)}`);
 }
 
 const PORT = Number(process.env.PORT) || 8080;
