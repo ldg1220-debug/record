@@ -32,13 +32,24 @@ type Chunk = {
 
 type Screen = 'setup' | 'main';
 
-const STORAGE_KEY = '@context_note_backend_url';
-const DEFAULT_URL = 'http://192.168.0.x:8080';
+type Settings = {
+  url: string;
+  token: string;
+};
 
-// ─── Setup Screen ────────────────────────────────────────────────────────────
+const STORAGE_KEY = '@context_note_settings';
 
-function SetupScreen({ onSave }: { onSave: (url: string) => void }) {
-  const [url, setUrl] = useState('');
+// ─── Setup Screen ─────────────────────────────────────────────────────────────
+
+function SetupScreen({
+  initial,
+  onSave,
+}: {
+  initial: Settings;
+  onSave: (s: Settings) => void;
+}) {
+  const [url, setUrl] = useState(initial.url);
+  const [token, setToken] = useState(initial.token);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
@@ -48,7 +59,16 @@ function SetupScreen({ onSave }: { onSave: (url: string) => void }) {
     setTesting(true);
     setTestResult(null);
     try {
-      const res = await fetch(`${target}/api/health`, { signal: AbortSignal.timeout(5000) });
+      const headers: Record<string, string> = {};
+      if (token.trim()) headers['x-api-token'] = token.trim();
+      const res = await fetch(`${target}/api/health`, {
+        headers,
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.status === 401) {
+        setTestResult({ ok: false, msg: '토큰 인증 실패 — API 토큰을 확인하세요.' });
+        return;
+      }
       const json = (await res.json()) as { status?: string };
       if (json.status === 'ok') {
         setTestResult({ ok: true, msg: '연결 성공! 서버가 정상입니다.' });
@@ -63,13 +83,15 @@ function SetupScreen({ onSave }: { onSave: (url: string) => void }) {
   };
 
   const save = () => {
-    const target = url.trim();
-    if (!target) {
+    const trimmed = url.trim();
+    if (!trimmed) {
       Alert.alert('URL 필요', '백엔드 서버 주소를 입력하세요.');
       return;
     }
-    onSave(target);
+    onSave({ url: trimmed, token: token.trim() });
   };
+
+  const canSave = url.trim().length > 0;
 
   return (
     <KeyboardAvoidingView
@@ -79,7 +101,7 @@ function SetupScreen({ onSave }: { onSave: (url: string) => void }) {
       <StatusBar style="light" />
       <ScrollView contentContainerStyle={styles.scroll}>
         <Text style={styles.title}>ContextNote</Text>
-        <Text style={styles.subtitle}>처음 시작하기 전에 백엔드 서버 주소를 설정해 주세요.</Text>
+        <Text style={styles.subtitle}>백엔드 서버 연결 설정</Text>
 
         <View style={[styles.panel, { marginTop: 32 }]}>
           <Text style={styles.label}>백엔드 URL</Text>
@@ -87,16 +109,30 @@ function SetupScreen({ onSave }: { onSave: (url: string) => void }) {
             style={styles.input}
             value={url}
             onChangeText={(v) => { setUrl(v); setTestResult(null); }}
-            placeholder={DEFAULT_URL}
+            placeholder="http://192.168.1.10:8080"
             placeholderTextColor="#6a6f79"
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
           />
           <Text style={styles.hint}>
-            PC와 동일한 Wi-Fi에 연결된 상태에서{'\n'}
-            PC IP + 포트 8080 형식으로 입력하세요.{'\n'}
-            예) http://192.168.1.10:8080
+            PC와 같은 Wi-Fi에 연결된 상태에서{'\n'}
+            PC의 로컬 IP + 포트 8080을 입력하세요.
+          </Text>
+
+          <Text style={[styles.label, { marginTop: 20 }]}>API 토큰</Text>
+          <TextInput
+            style={styles.input}
+            value={token}
+            onChangeText={(v) => { setToken(v); setTestResult(null); }}
+            placeholder="서버 .env의 API_TOKEN 값 (없으면 비워두기)"
+            placeholderTextColor="#6a6f79"
+            autoCapitalize="none"
+            autoCorrect={false}
+            secureTextEntry
+          />
+          <Text style={styles.hint}>
+            서버에 API_TOKEN이 설정된 경우 동일한 값을 입력하세요.
           </Text>
 
           {testResult && (
@@ -114,13 +150,13 @@ function SetupScreen({ onSave }: { onSave: (url: string) => void }) {
               disabled={!url.trim() || testing}
             >
               {testing
-                ? <ActivityIndicator color="#e6e7ea" />
+                ? <ActivityIndicator color="#e6e7ea" size="small" />
                 : <Text style={styles.secondaryText}>연결 테스트</Text>}
             </Pressable>
             <Pressable
-              style={[styles.primary, !url.trim() && styles.disabled]}
+              style={[styles.primary, !canSave && styles.disabled]}
               onPress={save}
-              disabled={!url.trim()}
+              disabled={!canSave}
             >
               <Text style={styles.primaryText}>저장 후 시작</Text>
             </Pressable>
@@ -131,13 +167,13 @@ function SetupScreen({ onSave }: { onSave: (url: string) => void }) {
   );
 }
 
-// ─── Main Screen ─────────────────────────────────────────────────────────────
+// ─── Main Screen ──────────────────────────────────────────────────────────────
 
 function MainScreen({
-  backendUrl,
+  settings,
   onOpenSettings,
 }: {
-  backendUrl: string;
+  settings: Settings;
   onOpenSettings: () => void;
 }) {
   const [agenda, setAgenda] = useState('');
@@ -151,15 +187,21 @@ function MainScreen({
   const agendaRef = useRef(agenda);
   agendaRef.current = agenda;
 
+  const authHeaders = useMemo(() => {
+    const h: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (settings.token) h['x-api-token'] = settings.token;
+    return h;
+  }, [settings.token]);
+
   const analyzeChunk = useCallback(
     async (id: number, text: string, agendaNow: string) => {
       try {
-        const res = await fetch(`${backendUrl}/api/analyze-chunk`, {
+        const res = await fetch(`${settings.url}/api/analyze-chunk`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: authHeaders,
           body: JSON.stringify({ agenda: agendaNow, textChunk: text }),
         });
-        if (!res.ok) throw new Error(await res.text());
+        if (!res.ok) throw new Error(`${res.status}`);
         const data = (await res.json()) as { category: Category; summary: string };
         setChunks((prev) =>
           prev.map((c) =>
@@ -175,7 +217,7 @@ function MainScreen({
         );
       }
     },
-    [backendUrl],
+    [settings.url, authHeaders],
   );
 
   useSpeechRecognitionEvent('result', (event) => {
@@ -244,13 +286,13 @@ function MainScreen({
         .map((c) => c.summary!);
       const fullText = chunks.map((c) => c.text).join('\n');
 
-      const res = await fetch(`${backendUrl}/api/generate-final-note`, {
+      const res = await fetch(`${settings.url}/api/generate-final-note`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: authHeaders,
         body: JSON.stringify({ agenda, mainNotes, sideNotes, fullText }),
       });
       if (!res.ok || !res.body) {
-        throw new Error(!res.ok ? await res.text() : '응답 스트림이 없습니다.');
+        throw new Error(!res.ok ? `서버 오류 (${res.status})` : '응답 스트림이 없습니다.');
       }
       const reader = (res.body as ReadableStream<Uint8Array>).getReader();
       const decoder = new TextDecoder();
@@ -264,7 +306,7 @@ function MainScreen({
     } finally {
       setGenerating(false);
     }
-  }, [agenda, chunks, backendUrl]);
+  }, [agenda, chunks, settings.url, authHeaders]);
 
   const resetAll = useCallback(() => {
     if (recording) ExpoSpeechRecognitionModule.stop();
@@ -287,8 +329,6 @@ function MainScreen({
     >
       <StatusBar style="light" />
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
-
-        {/* Header */}
         <View style={styles.rowBetween}>
           <View>
             <Text style={styles.title}>ContextNote</Text>
@@ -299,7 +339,6 @@ function MainScreen({
           </Pressable>
         </View>
 
-        {/* Agenda */}
         <Text style={styles.section}>아젠다</Text>
         <View style={styles.panel}>
           <TextInput
@@ -313,7 +352,6 @@ function MainScreen({
           />
         </View>
 
-        {/* Recording */}
         <Text style={styles.section}>녹음</Text>
         <View style={styles.panel}>
           <View style={styles.rowBetween}>
@@ -366,18 +404,13 @@ function MainScreen({
               </Text>
               <View style={{ flex: 1 }}>
                 <Text style={styles.chunkText}>{c.text}</Text>
-                {c.summary ? (
-                  <Text style={styles.chunkSummary}>→ {c.summary}</Text>
-                ) : null}
-                {c.error ? (
-                  <Text style={styles.chunkError}>{c.error}</Text>
-                ) : null}
+                {c.summary ? <Text style={styles.chunkSummary}>→ {c.summary}</Text> : null}
+                {c.error ? <Text style={styles.chunkError}>{c.error}</Text> : null}
               </View>
             </View>
           ))}
         </View>
 
-        {/* Final Note */}
         <Text style={styles.section}>최종 노트</Text>
         <View style={styles.panel}>
           <View style={styles.rowBetween}>
@@ -392,19 +425,15 @@ function MainScreen({
               onPress={generateFinal}
               disabled={generating || recording || chunks.length === 0}
             >
-              {generating ? (
-                <ActivityIndicator color="#0b0c10" />
-              ) : (
-                <Text style={styles.primaryText}>생성</Text>
-              )}
+              {generating
+                ? <ActivityIndicator color="#0b0c10" size="small" />
+                : <Text style={styles.primaryText}>생성</Text>}
             </Pressable>
           </View>
           <View style={styles.finalBox}>
-            {finalNote ? (
-              <Markdown style={markdownStyles}>{finalNote}</Markdown>
-            ) : (
-              <Text style={styles.status}>아직 생성되지 않았습니다.</Text>
-            )}
+            {finalNote
+              ? <Markdown style={markdownStyles}>{finalNote}</Markdown>
+              : <Text style={styles.status}>아직 생성되지 않았습니다.</Text>}
           </View>
         </View>
 
@@ -422,27 +451,31 @@ function MainScreen({
 
 export default function App() {
   const [screen, setScreen] = useState<Screen | null>(null);
-  const [backendUrl, setBackendUrl] = useState('');
+  const [settings, setSettings] = useState<Settings>({ url: '', token: '' });
 
   useEffect(() => {
     AsyncStorage.getItem(STORAGE_KEY).then((saved) => {
       if (saved) {
-        setBackendUrl(saved);
-        setScreen('main');
-      } else {
-        setScreen('setup');
+        try {
+          const parsed = JSON.parse(saved) as Settings;
+          setSettings(parsed);
+          setScreen('main');
+          return;
+        } catch {
+          // 이전 버전(url만 저장)에 대한 호환
+          setSettings({ url: saved, token: '' });
+          setScreen('main');
+          return;
+        }
       }
+      setScreen('setup');
     });
   }, []);
 
-  const handleSave = useCallback(async (url: string) => {
-    await AsyncStorage.setItem(STORAGE_KEY, url);
-    setBackendUrl(url);
+  const handleSave = useCallback(async (s: Settings) => {
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+    setSettings(s);
     setScreen('main');
-  }, []);
-
-  const handleOpenSettings = useCallback(() => {
-    setScreen('setup');
   }, []);
 
   if (screen === null) {
@@ -455,10 +488,10 @@ export default function App() {
   }
 
   if (screen === 'setup') {
-    return <SetupScreen onSave={handleSave} />;
+    return <SetupScreen initial={settings} onSave={handleSave} />;
   }
 
-  return <MainScreen backendUrl={backendUrl} onOpenSettings={handleOpenSettings} />;
+  return <MainScreen settings={settings} onOpenSettings={() => setScreen('setup')} />;
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
@@ -505,7 +538,7 @@ const styles = StyleSheet.create({
     textAlignVertical: 'top',
     fontSize: 14,
   },
-  hint: { color: '#8a8f99', fontSize: 12, marginTop: 8, lineHeight: 18 },
+  hint: { color: '#8a8f99', fontSize: 12, marginTop: 6, lineHeight: 18 },
   testResult: { borderRadius: 6, padding: 10, marginTop: 12 },
   testOk: { backgroundColor: '#0d2b1e' },
   testFail: { backgroundColor: '#2b0d0d' },
