@@ -195,11 +195,15 @@ function MainScreen({
   const analyzeChunk = useCallback(
     async (id: number, text: string, agendaNow: string) => {
       try {
+        console.log('[analyzeChunk] URL:', `${settings.url}/api/analyze-chunk`);
+        console.log('[analyzeChunk] headers:', JSON.stringify(authHeaders));
+        console.log('[analyzeChunk] token length:', settings.token?.length);
         const res = await fetch(`${settings.url}/api/analyze-chunk`, {
           method: 'POST',
           headers: authHeaders,
           body: JSON.stringify({ agenda: agendaNow, textChunk: text }),
         });
+        console.log('[analyzeChunk] response status:', res.status);
         if (!res.ok) throw new Error(`${res.status}`);
         const data = (await res.json()) as { category: Category; summary: string };
         setChunks((prev) =>
