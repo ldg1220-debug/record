@@ -2,15 +2,16 @@ import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
 import rateLimit from 'express-rate-limit';
-import Anthropic from '@anthropic-ai/sdk';
-import { z } from 'zod';
-import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
+import { GoogleGenAI } from '@google/genai';
 
-const client = new Anthropic();
+const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
+
+const MODEL_CLASSIFIER = process.env.MODEL_CLASSIFIER || 'gemini-2.5-flash';
+const MODEL_FINAL = process.env.MODEL_FINAL || 'gemini-2.5-pro';
 
 const app = express();
 
-// ── CORS: 명시적 allowlist, 모바일(no-origin)은 통과 ─────────────────────────
+// ── CORS: allowlist 기반, 모바일(no-origin)은 통과 ───────────────────────────
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '')
   .split(',')
   .map((s) => s.trim())
@@ -19,7 +20,6 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS ?? '')
 app.use(
   cors({
     origin: (origin, cb) => {
-      // 모바일 앱은 Origin 헤더 없음 → 토큰 미들웨어가 뒤에서 검증
       if (!origin) return cb(null, true);
       if (ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) {
         return cb(null, true);
@@ -35,7 +35,7 @@ app.use(express.json({ limit: '256kb' }));
 const API_TOKEN = process.env.API_TOKEN ?? '';
 
 function requireToken(req, res, next) {
-  if (!API_TOKEN) return next(); // 토큰 미설정 시 개발 편의상 허용 (경고 로그)
+  if (!API_TOKEN) return next();
   const token = req.headers['x-api-token'];
   if (token !== API_TOKEN) {
     return res.status(401).json({ error: '인증 실패' });
@@ -46,7 +46,7 @@ function requireToken(req, res, next) {
 // ── Rate limit ────────────────────────────────────────────────────────────────
 const chunkLimiter = rateLimit({
   windowMs: 60_000,
-  max: 120, // 분당 120회 (청크는 빈번하므로 여유롭게)
+  max: 120,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' },
@@ -54,7 +54,7 @@ const chunkLimiter = rateLimit({
 
 const finalLimiter = rateLimit({
   windowMs: 60_000,
-  max: 5, // Opus 4.7 호출은 분당 5회
+  max: 5,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' },
@@ -64,15 +64,27 @@ const finalLimiter = rateLimit({
 const MAX_AGENDA = 500;
 const MAX_CHUNK = 2_000;
 const MAX_FULL_TEXT = 150_000;
-const MAX_NOTES = 200;
+const MAX_NOTES_ITEM = 200;
 
-const ChunkAnalysisSchema = z.object({
-  category: z
-    .enum(['main', 'side'])
-    .describe('main: 메인 아젠다와 관련된 본론. side: 사담/잡담/참고 에피소드.'),
-  summary: z.string().describe('해당 청크의 한 줄(최대 60자) 요약.'),
-});
+// ── Gemini 구조화 출력 스키마 ─────────────────────────────────────────────────
+const ChunkAnalysisSchema = {
+  type: 'object',
+  properties: {
+    category: {
+      type: 'string',
+      enum: ['main', 'side'],
+      description: 'main: 메인 아젠다와 관련된 본론. side: 사담/잡담/참고 에피소드.',
+    },
+    summary: {
+      type: 'string',
+      description: '해당 청크의 한 줄(최대 60자) 요약.',
+    },
+  },
+  required: ['category', 'summary'],
+  propertyOrdering: ['category', 'summary'],
+};
 
+// ── 시스템 프롬프트 ───────────────────────────────────────────────────────────
 const CLASSIFIER_SYSTEM = `당신은 실시간 회의/강의 음성 인식 결과를 분류하는 분석기입니다.
 사용자가 정의한 메인 아젠다를 기준으로, 전달된 텍스트 조각이
 - 본론(main): 아젠다와 직접적으로 연결되는 논의/설명/결정
@@ -88,8 +100,9 @@ const FINAL_EDITOR_SYSTEM = `당신은 장시간 녹취된 회의/강의 원문�
 - 순수 잡담은 제거합니다.
 - 한국어 마크다운으로 출력합니다.`;
 
+// ── 라우트 ─────────────────────────────────────────────────────────────────────
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'context-note-backend' });
+  res.json({ status: 'ok', service: 'context-note-backend', llm: 'gemini' });
 });
 
 app.post('/api/analyze-chunk', requireToken, chunkLimiter, async (req, res) => {
@@ -105,26 +118,35 @@ app.post('/api/analyze-chunk', requireToken, chunkLimiter, async (req, res) => {
   }
 
   try {
-    const response = await client.messages.parse({
-      model: 'claude-haiku-4-5',
-      max_tokens: 512,
-      system: CLASSIFIER_SYSTEM,
-      messages: [
-        {
-          role: 'user',
-          content: `[아젠다]\n${agenda}\n\n[분석할 텍스트]\n"""\n${textChunk}\n"""`,
-        },
-      ],
-      output_config: {
-        format: zodOutputFormat(ChunkAnalysisSchema),
+    const response = await ai.models.generateContent({
+      model: MODEL_CLASSIFIER,
+      contents: `[아젠다]\n${agenda}\n\n[분석할 텍스트]\n"""\n${textChunk}\n"""`,
+      config: {
+        systemInstruction: CLASSIFIER_SYSTEM,
+        responseMimeType: 'application/json',
+        responseSchema: ChunkAnalysisSchema,
+        maxOutputTokens: 512,
+        thinkingConfig: { thinkingBudget: 0 }, // 분류는 thinking 끄고 빠르게
       },
     });
 
-    const parsed = response.parsed_output;
-    if (!parsed) {
+    const raw = response.text;
+    if (!raw) {
+      return res.status(502).json({ error: '분류 결과가 비어 있습니다.' });
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
       return res.status(502).json({ error: '분류 결과 파싱 실패' });
     }
-    res.json(parsed);
+    if (parsed?.category !== 'main' && parsed?.category !== 'side') {
+      return res.status(502).json({ error: '분류 결과 카테고리가 유효하지 않습니다.' });
+    }
+    res.json({
+      category: parsed.category,
+      summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+    });
   } catch (err) {
     handleApiError(err, res);
   }
@@ -147,8 +169,8 @@ app.post('/api/generate-final-note', requireToken, finalLimiter, async (req, res
 
   const userPrompt = [
     `# 오늘의 아젠다\n${agenda}`,
-    `# 실시간 분류 - 본론 메모\n${formatList(mainNotes, MAX_NOTES)}`,
-    `# 실시간 분류 - 사담/참고 메모\n${formatList(sideNotes, MAX_NOTES)}`,
+    `# 실시간 분류 - 본론 메모\n${formatList(mainNotes, MAX_NOTES_ITEM)}`,
+    `# 실시간 분류 - 사담/참고 메모\n${formatList(sideNotes, MAX_NOTES_ITEM)}`,
     `# 전체 원문 (음성 인식 결과)\n"""\n${fullText}\n"""`,
     `# 작성 지침\n- 주제별 섹션으로 재구성\n- 결정 사항 / 액션 아이템 분리\n- 도움이 되는 사담은 본문에 녹이기, 잡담은 제거\n- 한국어 마크다운, 제목은 \`#\`로 시작`,
   ].join('\n\n');
@@ -157,20 +179,21 @@ app.post('/api/generate-final-note', requireToken, finalLimiter, async (req, res
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('X-Accel-Buffering', 'no');
 
-  const stream = client.messages.stream({
-    model: 'claude-opus-4-7',
-    max_tokens: 64000,
-    thinking: { type: 'adaptive' },
-    system: FINAL_EDITOR_SYSTEM,
-    messages: [{ role: 'user', content: userPrompt }],
-  });
-
-  stream.on('text', (delta) => {
-    res.write(delta);
-  });
-
   try {
-    await stream.finalMessage();
+    const stream = await ai.models.generateContentStream({
+      model: MODEL_FINAL,
+      contents: userPrompt,
+      config: {
+        systemInstruction: FINAL_EDITOR_SYSTEM,
+        thinkingConfig: { thinkingBudget: -1, includeThoughts: false }, // 동적 thinking
+        maxOutputTokens: 32_000,
+      },
+    });
+
+    for await (const chunk of stream) {
+      const text = chunk.text;
+      if (text) res.write(text);
+    }
     res.end();
   } catch (err) {
     if (!res.headersSent) {
@@ -181,10 +204,11 @@ app.post('/api/generate-final-note', requireToken, finalLimiter, async (req, res
   }
 });
 
+// ── 유틸 ───────────────────────────────────────────────────────────────────────
 function formatList(items, maxItemLen) {
   if (!Array.isArray(items) || items.length === 0) return '(없음)';
   return items
-    .slice(0, 500) // 항목 수 상한
+    .slice(0, 500)
     .map((item, i) => {
       const text = typeof item === 'string' ? item : JSON.stringify(item);
       return `${i + 1}. ${text.slice(0, maxItemLen)}`;
@@ -193,20 +217,25 @@ function formatList(items, maxItemLen) {
 }
 
 function handleApiError(err, res) {
-  if (err instanceof Anthropic.RateLimitError) {
+  // Google GenAI는 에러를 status 필드 있는 객체로 던짐
+  const status = err?.status ?? err?.response?.status;
+  if (status === 429) {
     return res.status(429).json({ error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
   }
-  if (err instanceof Anthropic.AuthenticationError) {
+  if (status === 401 || status === 403) {
     return res.status(401).json({ error: 'API 키 인증 오류' });
   }
-  if (err instanceof Anthropic.APIError) {
-    // 상태 코드는 전달, 메시지는 일반화
-    return res.status(err.status ?? 500).json({ error: '외부 AI 서비스 오류가 발생했습니다.' });
+  if (typeof status === 'number') {
+    return res.status(status).json({ error: '외부 AI 서비스 오류가 발생했습니다.' });
   }
   console.error('[unexpected error]', err);
   res.status(500).json({ error: '내부 오류가 발생했습니다.' });
 }
 
+// ── 시작 ───────────────────────────────────────────────────────────────────────
+if (!process.env.GOOGLE_API_KEY) {
+  console.warn('[config] GOOGLE_API_KEY 미설정 — Gemini API 호출이 실패합니다.');
+}
 if (!API_TOKEN) {
   console.warn('[security] API_TOKEN 미설정 — 인증 없이 동작 중. .env에 API_TOKEN을 추가하세요.');
 }
@@ -214,4 +243,6 @@ if (!API_TOKEN) {
 const PORT = Number(process.env.PORT) || 8080;
 app.listen(PORT, () => {
   console.log(`ContextNote backend listening on http://localhost:${PORT}`);
+  console.log(`  classifier: ${MODEL_CLASSIFIER}`);
+  console.log(`  final-note: ${MODEL_FINAL}`);
 });
