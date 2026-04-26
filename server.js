@@ -6,8 +6,8 @@ import { GoogleGenAI } from '@google/genai';
 
 const ai = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
 
-const MODEL_CLASSIFIER = process.env.MODEL_CLASSIFIER || 'gemini-2.5-flash';
-const MODEL_FINAL = process.env.MODEL_FINAL || 'gemini-2.5-pro';
+const MODEL_CLASSIFIER = process.env.MODEL_CLASSIFIER || 'gemini-1.5-flash';
+const MODEL_FINAL = process.env.MODEL_FINAL || 'gemini-1.5-pro';
 
 const app = express();
 
