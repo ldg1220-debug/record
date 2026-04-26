@@ -38,6 +38,9 @@ function requireToken(req, res, next) {
   if (!API_TOKEN) return next();
   const token = req.headers['x-api-token'];
   if (token !== API_TOKEN) {
+    console.log('[auth] 401 - received token:', JSON.stringify(token));
+    console.log('[auth] 401 - expected token:', JSON.stringify(API_TOKEN));
+    console.log('[auth] 401 - lengths: received=', token?.length, 'expected=', API_TOKEN.length);
     return res.status(401).json({ error: '인증 실패' });
   }
   next();
