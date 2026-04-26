@@ -63,7 +63,6 @@ function SetupScreen({
       if (token.trim()) headers['x-api-token'] = token.trim();
       const res = await fetch(`${target}/api/health`, {
         headers,
-        signal: AbortSignal.timeout(5000),
       });
       if (res.status === 401) {
         setTestResult({ ok: false, msg: '토큰 인증 실패 — API 토큰을 확인하세요.' });
