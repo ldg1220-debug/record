@@ -178,32 +178,23 @@ app.post('/api/generate-final-note', requireToken, finalLimiter, async (req, res
     `# 작성 지침\n- 주제별 섹션으로 재구성\n- 결정 사항 / 액션 아이템 분리\n- 도움이 되는 사담은 본문에 녹이기, 잡담은 제거\n- 한국어 마크다운, 제목은 \`#\`로 시작`,
   ].join('\n\n');
 
-  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('X-Accel-Buffering', 'no');
-
   try {
-    const stream = await ai.models.generateContentStream({
+    const response = await ai.models.generateContent({
       model: MODEL_FINAL,
       contents: userPrompt,
       config: {
         systemInstruction: FINAL_EDITOR_SYSTEM,
-        thinkingConfig: { thinkingBudget: -1, includeThoughts: false }, // 동적 thinking
         maxOutputTokens: 32_000,
       },
     });
 
-    for await (const chunk of stream) {
-      const text = chunk.text;
-      if (text) res.write(text);
+    const text = response.text;
+    if (!text) {
+      return res.status(502).json({ error: '최종 노트 결과가 비어 있습니다.' });
     }
-    res.end();
+    res.json({ note: text });
   } catch (err) {
-    if (!res.headersSent) {
-      return handleApiError(err, res);
-    }
-    console.error('[final-note stream error]', err);
-    res.end();
+    handleApiError(err, res);
   }
 });
 

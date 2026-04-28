@@ -294,16 +294,14 @@ function MainScreen({
         headers: authHeaders,
         body: JSON.stringify({ agenda, mainNotes, sideNotes, fullText }),
       });
-      if (!res.ok || !res.body) {
-        throw new Error(!res.ok ? `서버 오류 (${res.status})` : '응답 스트림이 없습니다.');
+      if (!res.ok) {
+        throw new Error(`서버 오류 (${res.status})`);
       }
-      const reader = (res.body as ReadableStream<Uint8Array>).getReader();
-      const decoder = new TextDecoder();
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        setFinalNote((prev) => prev + decoder.decode(value, { stream: true }));
+      const data = await res.json();
+      if (!data.note) {
+        throw new Error('최종 노트 결과가 비어 있습니다.');
       }
+      setFinalNote(data.note);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
